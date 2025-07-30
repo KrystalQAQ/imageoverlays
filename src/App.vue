@@ -21,7 +21,7 @@
           <h2>History</h2>
           <ul class="history-list">
             <li v-for="item in history" :key="item.id" :class="{ active: item.active }" @click="goToHistory(item.id)">
-              State {{ item.id + 1 }}
+              {{ item.name || `State ${item.id}` }}
             </li>
           </ul>
         </div>
@@ -36,7 +36,7 @@ import { ref, onMounted, onBeforeUnmount } from 'vue';
 
 const imageList = ref([
   // { id: 'img-1', name: 'Image 1', src: '/src/assets/1.jpg' },
-  { id: 'img-2', name: 'Image 2', src: '/src/assets/2.jpg' },
+  // { id: 'img-2', name: 'Image 2', src: '/src/assets/2.jpg' },
   { id: 'img-3', name: 'Image 3', src: '/src/assets/3.jpg' },
   { id: 'img-4', name: 'Image 4', src: '/src/assets/4.jpg' },
   { id: 'img-5', name: 'Image 5', src: '/src/assets/5.jpg' },
@@ -46,7 +46,10 @@ const currentImageIndex = ref(-1);
 const annotationsStore = ref({});
 
 imageList.value.forEach(img => {
-  annotationsStore.value[img.id] = [];
+  annotationsStore.value[img.id] = {
+      annotations: [],
+      history: null, // Will store { history: [], historyIndex: 0 }
+  };
 });
 
 const history = ref([]);
@@ -70,17 +73,19 @@ const switchImage = (newIndex) => {
 
   if (currentImageIndex.value !== -1) {
     const currentImageId = imageList.value[currentImageIndex.value].id;
-    const currentAnnotations = tool.getAnnotations();
-    annotationsStore.value[currentImageId] = currentAnnotations;
-    console.log(`Saved annotations for ${currentImageId}:`, currentAnnotations);
+    annotationsStore.value[currentImageId] = {
+        annotations: tool.getAnnotations(),
+        history: tool.historyManager.getHistoryState(),
+    };
+    console.log(`Saved state for ${currentImageId}:`, annotationsStore.value[currentImageId]);
   }
 
   currentImageIndex.value = newIndex;
   const newImage = imageList.value[newIndex];
 
-  const newAnnotations = annotationsStore.value[newImage.id] || [];
-  console.log(`Loading annotations for ${newImage.id}:`, newAnnotations);
-  tool.loadImageAndAnnotations(newImage.src, newAnnotations);
+  const newState = annotationsStore.value[newImage.id] || { annotations: [], history: null };
+  console.log(`Loading state for ${newImage.id}:`, newState);
+  tool.loadImageAndAnnotationsWithHistory(newImage.src, newState.history || { history: [], historyIndex: 0 });
 };
 
 const handleKeydown = (e) => {

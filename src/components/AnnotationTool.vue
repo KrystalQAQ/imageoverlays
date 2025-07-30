@@ -14,10 +14,14 @@
       <button @click="toggleDrawingMode('circle')" :class="{ active: drawingMode === 'circle' }">
         <i class="icon-circle"></i>
       </button>
-      <button @click="undo" :disabled="historyIndex <= 0" title="Undo (Ctrl+Z)">
+      <button v-if="selectedAnnotations.length > 0" @click="deleteSelectedAnnotations" class="delete-button"
+        title="Delete Selected">
+        <i class="icon-clear"></i>
+      </button>
+      <button @click="undo" :disabled="!canUndo" title="Undo (Ctrl+Z)">
         <i class="icon-undo"></i>
       </button>
-      <button @click="redo" :disabled="historyIndex >= history.length - 1" title="Redo (Ctrl+Y)">
+      <button @click="redo" :disabled="!canRedo" title="Redo (Ctrl+Y)">
         <i class="icon-redo"></i>
       </button>
       <button @click="clearAll" title="清空标注">
@@ -35,15 +39,40 @@
       'grabbing': isSpacePressed,
       'select-mode': drawingMode === 'select'
     }"></div>
+
+    <!-- 标签选择弹窗 -->
+    <a-modal :open="showLabelDialog" title="选择标签" @ok="confirmLabel" @cancel="cancelLabeling" :keyboard="true" centered
+      :ok-button-props="{ disabled: !selectedLabelId }" ok-text="确认" cancel-text="取消">
+      <div class="label-radio-group">
+        <a-radio-group v-model:value="selectedLabelId">
+          <a-radio v-for="(label, index) in availableLabels" :key="label.id" :value="label.id" class="label-radio-item">
+            <span class="label-color-dot" :style="{ backgroundColor: label.color }"></span>
+            {{ label.name }} ({{ index + 1 }})
+          </a-radio>
+        </a-radio-group>
+      </div>
+    </a-modal>
   </div>
 </template>
 
 <script>
 import { defineComponent } from 'vue';
 import Konva from 'konva';
+import { Modal, Radio } from 'ant-design-vue';
+import StageManager from './annotation-modules/StageManager';
+import ImageManager from './annotation-modules/ImageManager';
+import DrawingManager from './annotation-modules/DrawingManager';
+import AnnotationManager from './annotation-modules/AnnotationManager';
+import SelectionManager from './annotation-modules/SelectionManager';
+import HistoryManager from './annotation-modules/HistoryManager';
 
 export default defineComponent({
   name: 'AnnotationTool',
+  components: {
+    'a-modal': Modal,
+    'a-radio': Radio,
+    'a-radio-group': Radio.Group,
+  },
   props: {
     enableZoom: {
       type: Boolean,
@@ -57,56 +86,82 @@ export default defineComponent({
       type: Array,
       default: () => [],
     },
+    labels: {
+      type: Array,
+      default: () => [],
+    },
   },
 
   data() {
     return {
-      imageSrc: null,
+      // Vue-managed state
       drawingMode: 'select', // Default to select mode
-      imagePosition: { x: 0, y: 0 },
-      imageSize: { width: 0, height: 0 },
       isSpacePressed: false,
-      originalImage: null,
-      resizeObserver: null,
+      showLabelDialog: false,
+      availableLabels: [
+        { id: 'person', name: '人', color: '#e74c3c' },
+        { id: 'car', name: '车', color: '#3498db' },
+        { id: 'dog', name: '狗', color: '#2ecc71' },
+        { id: 'cat', name: '猫', color: '#f1c40f' },
+        { id: 'bird', name: '鸟', color: '#9b59b6' },
+        { id: 'building', name: '建筑', color: '#e67e22' },
+        { id: 'tree', name: '树', color: '#27ae60' },
+        { id: 'sign', name: '标志', color: '#8e44ad' },
+      ],
+      selectedLabelId: null,
+      selectedAnnotations: [], // To track selected nodes for UI changes (e.g., delete button)
 
-      // History for undo/redo
-      history: [],
-      historyIndex: -1,
+      // Non-reactive, managed by classes
+      stageManager: null,
+      imageManager: null,
+      drawingManager: null,
+      annotationManager: null,
+      selectionManager: null,
+      historyManager: null,
 
-      // Konva Transformer for selection
-      transformer: null,
+      // History for undo/redo is now managed by HistoryManager
+      // history: [],
+      // historyIndex: -1,
 
-      // Non-reactive Konva instances
-      stage: null,
-      imageLayer: null,
-      annotationLayer: null,
-      isDrawing: false,
-      startPoint: { x: 0, y: 0 },
-      currentShape: null,
+      // isDrawing: false, // now managed by DrawingManager
+      currentShape: null, // Temp shape holder for labeling
       localMarkData: [],
+      resizeObserver: null,
     };
+  },
+
+  computed: {
+    canUndo() {
+      return this.historyManager ? this.historyManager.historyIndex > 0 : false;
+    },
+    canRedo() {
+      return this.historyManager ? this.historyManager.historyIndex < this.historyManager.history.length - 1 : false;
+    }
   },
 
   watch: {
     enableZoom(newValue) {
-      if (!this.stage) return;
-      if (newValue) {
-        this.stage.on('wheel', this.handleWheel);
-      } else {
-        this.stage.off('wheel');
-      }
+      // This will be handled by the StageManager if we decide to make it dynamic
     },
-    image(newVal) {
-      if (newVal) {
-        this.imageSrc = newVal;
-        this.drawImage();
+    async image(newVal) {
+      if (newVal && this.imageManager) {
+        this.loadImageAndAnnotations(newVal, this.markData);
       }
     },
     markData: {
-      handler(newData) {
-        this.localMarkData = JSON.parse(JSON.stringify(newData || []));
-        if (this.originalImage) {
-          this.loadAnnotations(this.localMarkData);
+      handler(newData, oldData) {
+        // Only reload if data has actually changed to avoid unnecessary re-renders
+        if (JSON.stringify(newData) !== JSON.stringify(oldData)) {
+          this.loadImageAndAnnotations(this.image, newData);
+        }
+      },
+      deep: true,
+      immediate: true,
+    },
+    labels: {
+      handler(newLabels) {
+        if (newLabels && newLabels.length > 0) {
+          this.availableLabels = [...newLabels];
         }
       },
       deep: true,
@@ -115,7 +170,7 @@ export default defineComponent({
   },
 
   mounted() {
-    this.initKonva();
+    this.initAnnotationTool();
     window.addEventListener('keydown', this.handleKeyDown);
     window.addEventListener('keyup', this.handleKeyUp);
 
@@ -131,722 +186,376 @@ export default defineComponent({
     if (this.resizeObserver) {
       this.resizeObserver.disconnect();
     }
+
+    this.drawingManager?.resetCurrentShape();
+    this.stageManager?.destroy();
+    this.selectionManager?.destroy();
   },
 
   methods: {
-    initKonva() {
+    initAnnotationTool() {
       const container = this.$refs.container;
-      if (container) {
-        const stageWidth = container.clientWidth;
-        const stageHeight = container.clientHeight;
-        this.stage = new Konva.Stage({
-          container,
-          width: stageWidth,
-          height: stageHeight,
-          draggable: true,
-        });
+      if (!container) return;
 
-        if (this.enableZoom) {
-          this.stage.on('wheel', this.handleWheel);
-        }
-        this.stage.on('mousedown', this.handleMouseDown);
-        this.stage.on('mousemove', this.handleMouseMove);
-        this.stage.on('mouseup', this.handleMouseUp);
-        this.stage.on('click tap', this.handleStageClick); // For selection
+      this.stageManager = new StageManager(container, this.enableZoom);
+      this.imageManager = new ImageManager(this.stageManager);
+      this.annotationManager = new AnnotationManager(this.stageManager, this.imageManager);
 
-        this.transformer = new Konva.Transformer({
-            keepRatio: true,
-            boundBoxFunc: (oldBox, newBox) => {
-                if (newBox.width < 5 || newBox.height < 5) {
-                    return oldBox;
-                }
-                return newBox;
-            },
-        });
+      this.historyManager = new HistoryManager((history) => {
+        this.$emit('history-changed', history);
+      });
+
+      this.selectionManager = new SelectionManager(this.stageManager, this.imageManager, {
+        onSelectionChange: (selectedNodes) => {
+          this.selectedAnnotations = selectedNodes;
+        },
+        onTransformEnd: (actionName) => this.saveState(actionName),
+      });
+
+      this.drawingManager = new DrawingManager(this.stageManager, this.imageManager, {
+        onDrawEnd: (shape) => {
+          this.currentShape = shape; // Keep the shape temporarily for labeling
+          this.openLabelDialog();
+        },
+      });
+
+      const stage = this.stageManager.getStage();
+      // Bind stage events to the drawing manager's handlers
+      stage.on('mousedown', (e) => !this.isSpacePressed && this.drawingManager.handleMouseDown(e));
+      stage.on('mousemove', this.drawingManager.handleMouseMove);
+      stage.on('mouseup', this.drawingManager.handleMouseUp);
+
+      // Initial load
+      if (this.image) {
+        this.loadImageAndAnnotations(this.image, this.markData);
+      } else {
+        this.historyManager.reset();
       }
     },
 
-    handleWheel(e) {
-        e.evt.preventDefault();
-        const stage = this.stage;
-        if (!stage) return;
+    async loadImageAndAnnotations(imageSrc, markData) {
+      if (!imageSrc || !this.imageManager) return;
 
-        const oldScale = stage.scaleX();
-        const pointer = stage.getPointerPosition();
-        if (!pointer) return;
-
-        const mousePointTo = {
-            x: (pointer.x - stage.x()) / oldScale,
-            y: (pointer.y - stage.y()) / oldScale,
-        };
-
-        const newScale = e.evt.deltaY > 0 ? oldScale * 1.1 : oldScale / 1.1;
-        stage.scale({ x: newScale, y: newScale });
-
-        const newPos = {
-            x: pointer.x - mousePointTo.x * newScale,
-            y: pointer.y - mousePointTo.y * newScale,
-        };
-        stage.position(newPos);
-
-        if (this.annotationLayer) {
-            const baseStrokeWidth = 2;
-            this.annotationLayer.children.forEach(shape => {
-                shape.strokeWidth(baseStrokeWidth / newScale);
-            });
-        }
-    },
-
-    loadImage(event) {
-      const target = event.target;
-      if (target.files && target.files[0]) {
-        const reader = new FileReader();
-        reader.onload = (e) => {
-          this.imageSrc = e.target?.result;
-          this.drawImage();
-        };
-        reader.readAsDataURL(target.files[0]);
+      try {
+        await this.imageManager.loadImage(imageSrc);
+        this.historyManager.reset();
+        this.loadAnnotations(markData || []);
+        this.saveState('Initial Load');
+      } catch (error) {
+        console.error("Error loading image and annotations:", error);
       }
     },
 
-    drawImage() {
-      if (!this.imageSrc || !this.stage) return;
-      const image = new Image();
-      this.originalImage = image; // Store original image object
-      image.src = this.imageSrc;
-      image.onload = () => {
-        if (!this.stage) return;
-        this.stage.position({ x: 0, y: 0 });
-        this.stage.scale({ x: 1, y: 1 });
-
-        const stageWidth = this.stage.width();
-        const stageHeight = this.stage.height();
-        const scale = Math.min(stageWidth / image.width, stageHeight / image.height);
-
-        this.imageSize = { width: image.width * scale, height: image.height * scale };
-        this.imagePosition = { x: (stageWidth - this.imageSize.width) / 2, y: (stageHeight - this.imageSize.height) / 2 };
-
-        if (this.imageLayer) this.imageLayer.destroy();
-        this.imageLayer = new Konva.Layer();
-        this.stage.add(this.imageLayer);
-
-        const konvaImage = new Konva.Image({
-          ...this.imagePosition,
-          ...this.imageSize,
-          image: image,
-          name: 'background-image',
-        });
-        this.imageLayer.add(konvaImage);
-
-        if (this.annotationLayer) this.annotationLayer.destroy();
-        this.annotationLayer = new Konva.Layer();
-        this.stage.add(this.annotationLayer);
-
-        if (this.localMarkData && this.localMarkData.length > 0) {
-            this.loadAnnotations(this.localMarkData);
-        }
-        this.saveState();
-      };
+    loadAnnotations(annotations) {
+      this.annotationManager.loadAnnotations(annotations, {
+        onStateChange: (actionName) => this.saveState(actionName),
+        addDraggable: (group) => this.selectionManager.addDraggable(group)
+      });
     },
 
     toggleDrawingMode(mode) {
-      this.drawingMode = this.drawingMode === mode ? null : mode;
+      if (this.drawingManager?.isDrawingInProgress()) {
+        this.drawingManager.resetCurrentShape();
+      }
+      // Toggle mode: if same mode is clicked, set to 'select', otherwise set to new mode.
+      this.drawingMode = this.drawingMode === mode ? 'select' : mode;
+      this.drawingManager?.setDrawingMode(this.drawingMode);
+
+      const isDrawing = this.drawingMode === 'rect' || this.drawingMode === 'circle';
+      if (isDrawing) {
+        this.selectionManager.getTransformer().nodes([]);
+      }
+
       this.updateStageDraggable();
-      this.updateShapesDraggable();
-    },
-
-    updateShapesDraggable() {
-        if (!this.annotationLayer) return;
-        const isDraggable = this.drawingMode === 'select' || this.drawingMode === null;
-        this.annotationLayer.children.forEach(shape => {
-            shape.draggable(isDraggable);
-        });
-    },
-
-    exportData() {
-        if (!this.annotationLayer || !this.originalImage || this.imageSize.width === 0) return;
-
-        const scale = this.imageSize.width / this.originalImage.width;
-
-        const annotations = this.annotationLayer.children.map(shape => {
-            const { x = 0, y = 0, width = 0, height = 0, radius = 0, ...attrs } = shape.getAttrs();
-
-            const relativePos = {
-                x: (x - this.imagePosition.x) / scale,
-                y: (y - this.imagePosition.y) / scale
-            }
-
-            if (shape instanceof Konva.Rect) {
-                return { type: 'rect', ...relativePos, width: width / scale, height: height / scale, stroke: attrs.stroke };
-            } else if (shape instanceof Konva.Circle) {
-                return { type: 'circle', ...relativePos, radius: radius / scale, stroke: attrs.stroke };
-            }
-            return null;
-        }).filter(Boolean);
-
-        const dataStr = JSON.stringify(annotations, null, 2);
-        console.log(dataStr);
-        // const dataBlob = new Blob([dataStr], { type: 'application/json' });
-        // const url = URL.createObjectURL(dataBlob);
-        // const link = document.createElement('a');
-        // link.href = url;
-        // link.download = 'annotations.json';
-        // document.body.appendChild(link);
-        // link.click();
-        // document.body.removeChild(link);
-        // URL.revokeObjectURL(url);
     },
 
     exportImage() {
-      if (!this.stage || !this.originalImage || !this.annotationLayer) {
+      const stage = this.stageManager?.getStage();
+      const originalImage = this.imageManager?.getOriginalImage();
+
+      if (!stage || !originalImage) {
         console.error("Cannot export, required elements are missing.");
         return;
       }
 
-      // 1. Create a temporary container for the offscreen stage
-      const tempContainer = document.createElement('div');
-      tempContainer.style.display = 'none';
-      document.body.appendChild(tempContainer);
+      // 1. Get annotation data in a normalized format
+      const annotations = this.annotationManager.getAnnotationsData();
 
-      // 2. Create the offscreen stage with original image dimensions
+      // 2. Create an offscreen stage
       const offscreenStage = new Konva.Stage({
-        container: tempContainer,
-        width: this.originalImage.width,
-        height: this.originalImage.height,
+        width: originalImage.width,
+        height: originalImage.height,
       });
 
-      // 3. Add layers for image and annotations
-      const imageLayer = new Konva.Layer();
-      const annotationLayer = new Konva.Layer();
-      offscreenStage.add(imageLayer, annotationLayer);
+      const offscreenImageLayer = new Konva.Layer();
+      const offscreenAnnotationLayer = new Konva.Layer();
+      offscreenStage.add(offscreenImageLayer, offscreenAnnotationLayer);
 
-      // 4. Add the original, unscaled image
-      imageLayer.add(new Konva.Image({
-        image: this.originalImage,
-        x: 0,
-        y: 0,
-        width: this.originalImage.width,
-        height: this.originalImage.height,
+      // 3. Add the original, unscaled image
+      offscreenImageLayer.add(new Konva.Image({
+        image: originalImage,
+        width: originalImage.width,
+        height: originalImage.height,
       }));
 
-      // 5. Calculate scale factor between displayed and original image
-      const scale = this.imageSize.width / this.originalImage.width;
+      // 4. Re-create annotations on the offscreen layer using the same manager method
+      annotations.forEach(ann => {
+        // Use a scale of 1 and zero position because we are drawing on the original-sized canvas
+        const group = this.annotationManager.createAnnotationGroup(ann, {
+          scale: 1,
+          imagePosition: { x: 0, y: 0 }
+        });
 
-      // 6. Copy annotations, transforming them to original resolution
-      this.annotationLayer.children.forEach(shape => {
-        const { x = 0, y = 0, width = 0, height = 0, radius = 0, ...attrs } = shape.getAttrs();
-
-        const baseAttrs = {
-          ...attrs,
-          x: (x - this.imagePosition.x) / scale,
-          y: (y - this.imagePosition.y) / scale,
-          strokeWidth: 4,
-          draggable: false,
-        };
-
-        if (shape instanceof Konva.Rect) {
-          const newShape = new Konva.Rect({
-            ...baseAttrs,
-            width: width / scale,
-            height: height / scale,
-          });
-          annotationLayer.add(newShape);
-        } else if (shape instanceof Konva.Circle) {
-          const newShape = new Konva.Circle({
-            ...baseAttrs,
-            radius: radius / scale,
-          });
-          annotationLayer.add(newShape);
+        if (group) {
+          // Override specific properties for export
+          group.draggable(false);
+          const mainShape = group.findOne('.main-shape');
+          if (mainShape) {
+            mainShape.strokeWidth(4); // Ensure a consistent, visible stroke width
+          }
+          offscreenAnnotationLayer.add(group);
         }
       });
 
-      // 7. Generate Data URL from the offscreen stage
       const dataURL = offscreenStage.toDataURL({ pixelRatio: 1 });
-      console.log(dataURL);
+      offscreenStage.destroy();
       return dataURL;
-      // 8. Trigger download
-      // const link = document.createElement('a');
-      // link.href = dataURL;
-      // link.download = 'annotated-image-original.png';
-      // document.body.appendChild(link);
-      // link.click();
-      // document.body.removeChild(link);
-
-      // // 9. Cleanup
-      // offscreenStage.destroy();
-      // document.body.removeChild(tempContainer);
     },
 
     getAnnotations() {
-        if (!this.annotationLayer || !this.originalImage || !this.imageSize.width === 0) return [];
-
-        const scale = this.imageSize.width / this.originalImage.width;
-
-        const annotations = this.annotationLayer.children.map(shape => {
-            if (shape instanceof Konva.Transformer) return null;
-            const { x = 0, y = 0, width = 0, height = 0, radius = 0, ...attrs } = shape.getAttrs();
-
-            const relativePos = {
-                x: (x - this.imagePosition.x) / scale,
-                y: (y - this.imagePosition.y) / scale
-            }
-
-            if (shape instanceof Konva.Rect) {
-                return { type: 'rect', ...relativePos, width: width / scale, height: height / scale, stroke: attrs.stroke };
-            } else if (shape instanceof Konva.Circle) {
-                return { type: 'circle', ...relativePos, radius: radius / scale, stroke: attrs.stroke };
-            }
-            return null;
-        }).filter(Boolean);
-
-        return annotations;
+      return this.annotationManager?.getAnnotationsData();
     },
 
-    loadImageAndAnnotations(newImageSrc, newMarkData) {
-        if (!newImageSrc) return;
-
-        // Reset state for new image
-        this.history = [];
-        this.historyIndex = -1;
-        this.transformer?.nodes([]);
-
-        this.imageSrc = newImageSrc;
-        this.localMarkData = newMarkData || [];
-
-        this.drawImage();
-    },
-
-    saveState() {
-        const annotations = this.getAnnotations();
-        this.history = this.history.slice(0, this.historyIndex + 1);
-        this.history.push(annotations);
-        this.historyIndex++;
-        this.$emit('history-changed', this.history.map((_, i) => ({ id: i, active: i === this.historyIndex })));
-
+    saveState(actionName) {
+      const annotations = this.annotationManager.getAnnotationsData();
+      this.historyManager.push(annotations, actionName);
     },
 
     undo() {
-        if (this.historyIndex > 0) {
-            this.historyIndex--;
-            this.loadAnnotations(this.history[this.historyIndex]);
-            this.transformer?.nodes([]);
-             this.$emit('history-changed', this.history.map((_, i) => ({ id: i, active: i === this.historyIndex })));
-        }
+      const state = this.historyManager.undo();
+      if (state) {
+        this.loadAnnotations(state);
+        this.selectionManager.getTransformer()?.nodes([]);
+      }
     },
 
     redo() {
-        if (this.historyIndex < this.history.length - 1) {
-            this.historyIndex++;
-            this.loadAnnotations(this.history[this.historyIndex]);
-            this.transformer?.nodes([]);
-            this.$emit('history-changed', this.history.map((_, i) => ({ id: i, active: i === this.historyIndex })));
-        }
-    },
-
-    loadStateFromHistory(index) {
-        if (index >= 0 && index < this.history.length) {
-            this.historyIndex = index;
-            this.loadAnnotations(this.history[this.historyIndex]);
-            this.transformer?.nodes([]);
-            this.$emit('history-changed', this.history.map((_, i) => ({ id: i, active: i === this.historyIndex })));
-        }
+      const state = this.historyManager.redo();
+      if (state) {
+        this.loadAnnotations(state);
+        this.selectionManager.getTransformer()?.nodes([]);
+      }
     },
 
     clearAll() {
-        this.loadAnnotations([]);
-        this.resetImageView();
-
-        this.history = [];
-        this.historyIndex = -1;
-        this.saveState(); // new empty state
-    },
-
-    resetImageView() {
-        if (!this.stage || !this.originalImage) return;
-
-        this.stage.position({ x: 0, y: 0 });
-        this.stage.scale({ x: 1, y: 1 });
-
-        const stageWidth = this.stage.width();
-        const stageHeight = this.stage.height();
-        const scale = Math.min(stageWidth / this.originalImage.width, stageHeight / this.originalImage.height);
-
-        this.imageSize = { width: this.originalImage.width * scale, height: this.originalImage.height * scale };
-        this.imagePosition = { x: (stageWidth - this.imageSize.width) / 2, y: (stageHeight - this.imageSize.height) / 2 };
-
-        const konvaImage = this.imageLayer?.findOne('.background-image');
-        if (konvaImage) {
-            konvaImage.setAttrs({
-                ...this.imagePosition,
-                ...this.imageSize,
-            });
-        }
-
-        if (this.annotationLayer) {
-            const baseStrokeWidth = 2;
-            this.annotationLayer.children.forEach(shape => {
-                if (shape instanceof Konva.Transformer) return;
-                shape.strokeWidth(baseStrokeWidth / 1.0);
-            });
-        }
-    },
-
-    getClampedPos(x, y) {
-      return {
-        x: Math.max(this.imagePosition.x, Math.min(x, this.imagePosition.x + this.imageSize.width)),
-        y: Math.max(this.imagePosition.y, Math.min(y, this.imagePosition.y + this.imageSize.height)),
-      };
-    },
-
-    handleMouseDown(e) {
-      if (this.isSpacePressed) return; // Prevent drawing when panning
-      if (this.drawingMode === null || this.drawingMode === 'select') {
-        return;
-      }
-      this.isDrawing = true;
-
-      const pos = this.stage.getPointerPosition();
-      if (!pos) return;
-
-      const scale = this.stage.scaleX();
-      const stagePos = { x: (pos.x - this.stage.x()) / scale, y: (pos.y - this.stage.y()) / scale };
-
-      this.startPoint = this.getClampedPos(stagePos.x, stagePos.y);
-
-      const baseStrokeWidth = 2;
-      const componentThis = this;
-      const commonAttrs = {
-        ...this.startPoint,
-        strokeWidth: baseStrokeWidth / scale,
-        draggable: true,
-      };
-
-      if (this.drawingMode === 'rect') {
-        this.currentShape = new Konva.Rect({
-          ...commonAttrs,
-          width: 0,
-          height: 0,
-          stroke: '#e74c3c',
-        });
-        this.currentShape.on('dragmove', this.handleShapeDrag);
-
-      } else {
-        this.currentShape = new Konva.Circle({
-          ...commonAttrs,
-          radius: 0,
-          stroke: '#3498db',
-        });
-        this.currentShape.on('dragmove', this.handleShapeDrag);
-      }
-      this.annotationLayer?.add(this.currentShape);
-    },
-
-    handleMouseMove(e) {
-      if (!this.isDrawing || !this.currentShape || !this.stage) return;
-
-      const pos = this.stage.getPointerPosition();
-      if (!pos) return;
-
-      const scale = this.stage.scaleX();
-      const stagePos = { x: (pos.x - this.stage.x()) / scale, y: (pos.y - this.stage.y()) / scale };
-      const point = this.getClampedPos(stagePos.x, stagePos.y);
-
-      if (this.currentShape instanceof Konva.Rect) {
-        this.currentShape.width(point.x - this.startPoint.x);
-        this.currentShape.height(point.y - this.startPoint.y);
-      } else if (this.currentShape instanceof Konva.Circle) {
-        const dx = point.x - this.startPoint.x;
-        const dy = point.y - this.startPoint.y;
-        this.currentShape.radius(Math.sqrt(dx * dx + dy * dy));
-      }
-    },
-
-    handleMouseUp() {
-      if (this.isDrawing) {
-        this.isDrawing = false;
-
-        const shape = this.currentShape;
-        if (shape instanceof Konva.Rect) {
-            if (shape.width() < 0) {
-                shape.x(shape.x() + shape.width());
-                shape.width(-shape.width());
-            }
-            if (shape.height() < 0) {
-                shape.y(shape.y() + shape.height());
-                shape.height(-shape.height());
-            }
-        }
-
-        this.currentShape = null;
-        this.updateShapesDraggable();
-        this.saveState();
-      }
+      this.historyManager.reset();
+      this.loadAnnotations([]);
+      this.imageManager?.resetView();
+      this.saveState('Clear All');
     },
 
     updateStageDraggable() {
-        if (this.stage) {
-            this.stage.draggable(this.isSpacePressed || this.drawingMode === null || this.drawingMode === 'select');
-        }
+      const stage = this.stageManager?.getStage();
+      if (stage) {
+        // Stage is draggable when space is pressed OR when not in a drawing mode.
+        const notInDrawMode = this.drawingMode !== 'rect' && this.drawingMode !== 'circle';
+        stage.draggable(this.isSpacePressed || notInDrawMode);
+      }
     },
 
     handleKeyDown(e) {
-        if (e.key === ' ' && !this.isSpacePressed) {
-            e.preventDefault();
-            this.isSpacePressed = true;
-            this.updateStageDraggable();
-            return;
-        }
-
-        if (e.key === 'Delete' || e.key === 'Backspace') {
-            e.preventDefault();
-            const selectedNodes = this.transformer?.nodes() || [];
-            if (selectedNodes.length > 0) {
-                selectedNodes.forEach(node => node.destroy());
-                this.transformer.nodes([]);
-                this.saveState();
-            }
-            return;
-        }
-
-        if (e.ctrlKey || e.metaKey) {
-            if (e.key === 'z') {
-                e.preventDefault();
-                this.undo();
-            } else if (e.key === 'y') {
-                e.preventDefault();
-                this.redo();
-            }
-            return
-        }
-
-        const targetTagName = e.target.tagName.toLowerCase();
-        if (['input', 'textarea', 'select'].includes(targetTagName)) {
-            return;
-        }
-
-        const modeMap = {
-            's': 'select',
-            'r': 'rect',
-            'c': 'circle',
-        };
-
-        const mode = modeMap[e.key.toLowerCase()];
-        if (mode) {
-            e.preventDefault();
-            this.toggleDrawingMode(mode);
-        }
-    },
-
-    handleKeyUp(e) {
-        if (e.key === ' ') {
-            e.preventDefault();
-            this.isSpacePressed = false;
-            this.updateStageDraggable();
-        }
-    },
-
-    loadAnnotations(annotations) {
-      if (!this.annotationLayer || !this.originalImage || this.imageSize.width === 0) {
+      if (e.key === ' ' && !this.isSpacePressed) {
+        e.preventDefault();
+        this.isSpacePressed = true;
+        this.updateStageDraggable();
         return;
       }
 
-      this.annotationLayer.destroyChildren();
-
-      if (this.transformer) {
-        this.transformer.destroy();
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        e.preventDefault();
+        this.deleteSelectedAnnotations();
+        return;
       }
-      this.transformer = new Konva.Transformer({
-          keepRatio: true,
-          boundBoxFunc: (oldBox, newBox) => {
-              if (newBox.width < 5 || newBox.height < 5) {
-                  return oldBox;
-              }
-              return newBox;
-          },
-      });
-      this.annotationLayer.add(this.transformer);
 
-
-      const scale = this.imageSize.width / this.originalImage.width;
-      const stageScale = this.stage.scaleX();
-      const baseStrokeWidth = 2;
-      const componentThis = this;
-
-      annotations.forEach(ann => {
-        const commonAttrs = {
-          x: ann.x * scale + this.imagePosition.x,
-          y: ann.y * scale + this.imagePosition.y,
-          stroke: ann.stroke || (ann.type === 'rect' ? '#e74c3c' : '#3498db'),
-          strokeWidth: baseStrokeWidth / stageScale,
-          draggable: true,
-        };
-
-        let shape;
-        if (ann.type === 'rect') {
-          shape = new Konva.Rect({
-            ...commonAttrs,
-            width: ann.width * scale,
-            height: ann.height * scale,
-          });
-        } else if (ann.type === 'circle') {
-          shape = new Konva.Circle({
-            ...commonAttrs,
-            radius: ann.radius * scale,
-          });
+      if (e.ctrlKey || e.metaKey) {
+        if (e.key === 'z') {
+          e.preventDefault();
+          this.undo();
+        } else if (e.key === 'y') {
+          e.preventDefault();
+          this.redo();
         }
-
-        if (shape) {
-          shape.on('dragmove', this.handleShapeDrag);
-          shape.on('dragend', () => this.saveState());
-          shape.on('transformend', () => this.saveState());
-          this.annotationLayer.add(shape);
-        }
-      });
-      this.updateShapesDraggable();
-    },
-
-    handleShapeDrag(e) {
-      const shape = e.target;
-      const stage = this.stage;
-      if (!stage) return;
-
-      const image = stage.findOne('.background-image');
-      if (!image) return;
-
-      const imageBox = image.getClientRect();
-      let shapeBox = shape.getClientRect();
-
-      let correctedX = shape.x();
-      let correctedY = shape.y();
-
-      const dx = shape.x() - shapeBox.x / stage.scaleX();
-      const dy = shape.y() - shapeBox.y / stage.scaleY();
-
-      if (shapeBox.x < imageBox.x) {
-        correctedX = imageBox.x / stage.scaleX() + dx;
-      }
-      if (shapeBox.y < imageBox.y) {
-        correctedY = imageBox.y / stage.scaleY() + dy;
-      }
-      if (shapeBox.x + shapeBox.width > imageBox.x + imageBox.width) {
-        correctedX = (imageBox.x + imageBox.width - shapeBox.width) / stage.scaleX() + dx;
-      }
-      if (shapeBox.y + shapeBox.height > imageBox.y + imageBox.height) {
-        correctedY = (imageBox.y + imageBox.height - shapeBox.height) / stage.scaleY() + dy;
+        return
       }
 
-      shape.x(correctedX);
-      shape.y(correctedY);
-    },
+      const targetTagName = e.target.tagName.toLowerCase();
+      if (['input', 'textarea', 'select'].includes(targetTagName)) {
+        return;
+      }
 
-    getDragBoundFunc() {
-      return function(pos) {
-        const shape = this;
-        const stage = shape.getStage();
-        if (!stage) return pos;
-
-        const image = stage.findOne('.background-image');
-        if (!image) return pos;
-
-        // Use absolute position for dragBoundFunc as it's relative to the screen
-        const absPos = shape.getAbsolutePosition();
-        const offsetX = absPos.x - pos.x;
-        const offsetY = absPos.y - pos.y;
-
-        const imageRect = image.getClientRect(); // This is the boundary in absolute coordinates
-
-        let newAbsX, newAbsY;
-        const halfStroke = shape.strokeWidth() / 2;
-
-        if (shape instanceof Konva.Rect) {
-            const shapeBox = shape.getClientRect({ relativeTo: stage });
-            newAbsX = Math.max(imageRect.x + halfStroke, pos.x);
-            newAbsX = Math.min(newAbsX, imageRect.x + imageRect.width - shapeBox.width - halfStroke);
-
-            newAbsY = Math.max(imageRect.y + halfStroke, pos.y);
-            newAbsY = Math.min(newAbsY, imageRect.y + imageRect.height - shapeBox.height - halfStroke);
-        } else if (shape instanceof Konva.Circle) {
-            const radius = shape.radius();
-            const effectiveRadius = radius + halfStroke;
-            newAbsX = Math.max(imageRect.x + effectiveRadius, pos.x);
-            newAbsX = Math.min(newAbsX, imageRect.x + imageRect.width - effectiveRadius);
-
-            newAbsY = Math.max(imageRect.y + effectiveRadius, pos.y);
-            newAbsY = Math.min(newAbsY, imageRect.y + imageRect.height - effectiveRadius);
-        } else {
-            return pos;
-        }
-
-        return {
-            x: newAbsX - offsetX,
-            y: newAbsY - offsetY,
-        };
+      const modeMap = {
+        's': 'select',
+        'r': 'rect',
+        'c': 'circle',
       };
+
+      const mode = modeMap[e.key.toLowerCase()];
+      if (mode) {
+        e.preventDefault();
+        this.toggleDrawingMode(mode);
+      }
+
+      // Numeric keys for label selection
+      const numKey = parseInt(e.key);
+      if (!isNaN(numKey) && numKey >= 1 && numKey <= this.availableLabels.length) {
+        e.preventDefault();
+        if (this.showLabelDialog) {
+          this.selectedLabelId = this.availableLabels[numKey - 1].id;
+          this.confirmLabel();
+        }
+      }
+
+      // ESC to close dialog or cancel drawing
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        if (this.showLabelDialog) {
+          this.cancelLabeling();
+        } else if (this.drawingManager?.isDrawingInProgress()) {
+          this.drawingManager.resetCurrentShape();
+        }
+      }
+    },
+
+    handleKeyUp(e) {
+      if (e.key === ' ') {
+        e.preventDefault();
+        this.isSpacePressed = false;
+        this.updateStageDraggable();
+      }
     },
 
     handleResize() {
-      const container = this.$refs.container;
-      if (!container || !this.stage || !this.originalImage) return;
+      const originalImage = this.imageManager?.getOriginalImage();
+      if (!this.stageManager || !originalImage) return;
 
-      const newWidth = container.clientWidth;
-      const newHeight = container.clientHeight;
+      // 1. Get current annotations before resize
+      const annotations = this.annotationManager.getAnnotationsData();
 
-      const oldImagePos = { ...this.imagePosition };
-      const oldImageSize = { ...this.imageSize };
+      // 2. Update stage and image view
+      this.stageManager.updateSize();
+      this.imageManager.resetView();
 
-      this.stage.width(newWidth);
-      this.stage.height(newHeight);
+      // 3. Reload annotations, they will be recalculated for the new size
+      this.loadAnnotations(annotations);
+    },
 
-      const scale = Math.min(newWidth / this.originalImage.width, newHeight / this.originalImage.height);
-      this.imageSize = { width: this.originalImage.width * scale, height: this.originalImage.height * scale };
-      this.imagePosition = {
-        x: (newWidth - this.imageSize.width) / 2,
-        y: (newHeight - this.imageSize.height) / 2,
-      };
+    openLabelDialog() {
+      this.showLabelDialog = true;
+      this.selectedLabelId = null;
+    },
 
-      const konvaImage = this.imageLayer?.findOne('Image');
-      if (konvaImage) {
-        konvaImage.setAttrs({
-          ...this.imagePosition,
-          ...this.imageSize,
-        });
+    cancelLabeling() {
+      this.drawingManager.resetCurrentShape(); // The drawing manager created the shape
+      this.currentShape = null;
+      this.showLabelDialog = false;
+    },
+
+    confirmLabel() {
+      if (!this.selectedLabelId || !this.currentShape) {
+        this.cancelLabeling();
+        return;
+      }
+      const selectedLabel = this.availableLabels.find(l => l.id === this.selectedLabelId);
+      if (!selectedLabel) {
+        this.cancelLabeling();
+        return;
       }
 
-      if (this.annotationLayer && oldImageSize.width > 0) {
-        const scaleRatio = this.imageSize.width / oldImageSize.width;
+      const shape = this.currentShape;
+      shape.stroke(selectedLabel.color);
+      shape.name('main-shape'); // Assign a name for easier lookup
 
-        this.annotationLayer.children.forEach(shape => {
-            if (shape instanceof Konva.Transformer) return;
-          const relX = shape.x() - oldImagePos.x;
-          const relY = shape.y() - oldImagePos.y;
+      const group = new Konva.Group({
+        x: shape.x(),
+        y: shape.y(),
+        draggable: true,
+        name: 'annotation-group',
+      });
 
-          shape.x(relX * scaleRatio + this.imagePosition.x);
-          shape.y(relY * scaleRatio + this.imagePosition.y);
+      // Reset shape's position relative to the group
+      shape.position({ x: 0, y: 0 });
+      group.add(shape);
 
-          if (shape instanceof Konva.Rect) {
-            shape.width(shape.width() * scaleRatio);
-            shape.height(shape.height() * scaleRatio);
-          } else if (shape instanceof Konva.Circle) {
-            shape.radius(shape.radius() * scaleRatio);
+      // Add label to the group
+      const labelText = `${selectedLabel.name}${this.getLabelCount(selectedLabel.id)}`;
+      this.annotationManager.addLabelToGroup(group, labelText, selectedLabel.color);
+
+      // Add the completed group to the layer and selection manager
+      this.annotationManager.annotationLayer.add(group);
+      this.selectionManager.addDraggable(group);
+
+      // Clean up and save state
+      this.currentShape = null; // We've moved the shape into the group
+      this.saveState(`Add ${selectedLabel.name}`);
+      this.showLabelDialog = false;
+      this.selectedLabelId = null;
+    },
+
+    getLabelCount(labelId) {
+      const labelName = this.availableLabels.find(l => l.id === labelId)?.name;
+      if (!labelName) return 1;
+
+      let count = 0;
+      this.annotationManager.annotationLayer.find('.label-text').forEach(text => {
+          if (text.text().startsWith(labelName)) {
+              const match = text.text().match(new RegExp(`^${labelName}(\\d+)$`));
+              if (match) {
+                  const num = parseInt(match[1]);
+                  if (num > count) count = num;
+              }
           }
+      });
+      return count + 1;
+    },
+
+    deleteSelectedAnnotations() {
+      const transformer = this.selectionManager?.getTransformer();
+      const selectedNodes = transformer?.nodes() || [];
+      if (selectedNodes.length > 0) {
+        selectedNodes.forEach(node => {
+          node.destroy(); // Destroy the whole group
         });
+        transformer.nodes([]);
+        this.saveState(`Delete ${selectedNodes.length} item(s)`);
       }
     },
 
-    handleStageClick(e) {
-      if (this.drawingMode === 'select' || this.drawingMode === null) {
-        if (e.target === this.stage) {
-          this.transformer.nodes([]);
-          return;
-        }
+    loadStateFromHistory(index) {
+      const state = this.historyManager.goToState(index);
+      if (state) {
+        this.loadAnnotations(state);
+        this.selectionManager.getTransformer()?.nodes([]);
+      }
+    },
 
-        if (e.target.getParent() === this.annotationLayer) {
-          this.transformer.nodes([e.target]);
-        }
+    loadImageAndAnnotationsWithHistory(newImageSrc, historyState) {
+      if (!newImageSrc) return;
+
+      this.selectionManager?.getTransformer()?.nodes([]);
+      this.drawingManager?.resetCurrentShape();
+      this.showLabelDialog = false;
+      this.selectedLabelId = null;
+
+      const stateToLoad = this.historyManager.setHistoryState(historyState || { history: [], historyIndex: 0 });
+
+      if (this.imageManager) {
+        this.imageManager.loadImage(newImageSrc).then(() => {
+          this.loadAnnotations(stateToLoad || []);
+        });
       }
     },
   },
-  expose: ['loadStateFromHistory', 'getAnnotations', 'loadImageAndAnnotations'],
+  expose: ['getAnnotations', 'historyManager', 'loadStateFromHistory', 'loadImageAndAnnotationsWithHistory'],
 });
 </script>
 
@@ -921,6 +630,15 @@ button:disabled {
   opacity: 0.5;
 }
 
+.delete-button {
+  background-color: #ff4d4f;
+  color: white;
+}
+
+.delete-button:hover {
+  background-color: #e83a3d;
+}
+
 .export-button {
   background-color: #4a69ff;
   color: white;
@@ -944,21 +662,31 @@ button:disabled {
 .konva-container.drawing {
   cursor: crosshair;
 }
+
 .konva-container.grabbing {
-    cursor: grab;
+  cursor: grab;
 }
+
 .konva-container.select-mode {
   cursor: default;
 }
 
 [class^="icon-"] {
   display: inline-block;
-  width: 24px; /* Increased size */
-  height: 24px; /* Increased size */
+  width: 24px;
+  /* Increased size */
+  height: 24px;
+  /* Increased size */
   background-color: currentColor;
 }
 
-.icon-rect, .icon-circle, .icon-export, .icon-select, .icon-image-export, .icon-upload, .icon-clear {
+.icon-rect,
+.icon-circle,
+.icon-export,
+.icon-select,
+.icon-image-export,
+.icon-upload,
+.icon-clear {
   -webkit-mask-size: contain;
   mask-size: contain;
   -webkit-mask-repeat: no-repeat;
@@ -967,13 +695,80 @@ button:disabled {
   mask-position: center;
 }
 
-.icon-rect { -webkit-mask-image: url('data:image/svg+xml;charset=UTF-8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect></svg>'); mask-image: url('data:image/svg+xml;charset=UTF-8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect></svg>'); }
-.icon-circle { -webkit-mask-image: url('data:image/svg+xml;charset=UTF-8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle></svg>'); mask-image: url('data:image/svg+xml;charset=UTF-8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle></svg>'); }
-.icon-export { -webkit-mask-image: url('data:image/svg+xml;charset=UTF-8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>'); mask-image: url('data:image/svg+xml;charset=UTF-8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>'); }
-.icon-select { -webkit-mask-image: url('data:image/svg+xml;charset=UTF-8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3l7 18 2.5-7.5L21 9l-18-6z"></path></svg>'); mask-image: url('data:image/svg+xml;charset=UTF-8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3l7 18 2.5-7.5L21 9l-18-6z"></path></svg>'); }
-.icon-image-export { -webkit-mask-image: url('data:image/svg+xml;charset=UTF-8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7"></path><line x1="16" y1="3" x2="22" y2="9"></line><line x1="10" y1="14" x2="22" y2="2"></line></svg>'); mask-image: url('data:image/svg+xml;charset=UTF-8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7"></path><line x1="16" y1="3" x2="22" y2="9"></line><line x1="10" y1="14" x2="22" y2="2"></line></svg>');}
-.icon-upload { -webkit-mask-image: url('data:image/svg+xml;charset=UTF-8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>'); mask-image: url('data:image/svg+xml;charset=UTF-8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>');}
-.icon-undo { -webkit-mask-image: url('data:image/svg+xml;charset=UTF-8,<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-corner-up-left"><polyline points="9 14 4 9 9 4"></polyline><path d="M20 20v-7a4 4 0 0 0-4-4H4"></path></svg>'); mask-image: url('data:image/svg+xml;charset=UTF-8,<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-corner-up-left"><polyline points="9 14 4 9 9 4"></polyline><path d="M20 20v-7a4 4 0 0 0-4-4H4"></path></svg>'); }
-.icon-redo { -webkit-mask-image: url('data:image/svg+xml;charset=UTF-8,<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-corner-up-right"><polyline points="15 14 20 9 15 4"></polyline><path d="M4 20v-7a4 4 0 0 1 4-4h12"></path></svg>'); mask-image: url('data:image/svg+xml;charset=UTF-8,<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-corner-up-right"><polyline points="15 14 20 9 15 4"></polyline><path d="M4 20v-7a4 4 0 0 1 4-4h12"></path></svg>'); }
-.icon-clear { -webkit-mask-image: url('data:image/svg+xml;charset=UTF-8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18m-2 0v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"></path></svg>'); mask-image: url('data:image/svg+xml;charset=UTF-8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18m-2 0v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"></path></svg>'); }
+.icon-rect {
+  -webkit-mask-image: url('data:image/svg+xml;charset=UTF-8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect></svg>');
+  mask-image: url('data:image/svg+xml;charset=UTF-8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect></svg>');
+}
+
+.icon-circle {
+  -webkit-mask-image: url('data:image/svg+xml;charset=UTF-8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle></svg>');
+  mask-image: url('data:image/svg+xml;charset=UTF-8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle></svg>');
+}
+
+.icon-export {
+  -webkit-mask-image: url('data:image/svg+xml;charset=UTF-8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>');
+  mask-image: url('data:image/svg+xml;charset=UTF-8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>');
+}
+
+.icon-select {
+  -webkit-mask-image: url('data:image/svg+xml;charset=UTF-8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3l7 18 2.5-7.5L21 9l-18-6z"></path></svg>');
+  mask-image: url('data:image/svg+xml;charset=UTF-8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3l7 18 2.5-7.5L21 9l-18-6z"></path></svg>');
+}
+
+.icon-image-export {
+  -webkit-mask-image: url('data:image/svg+xml;charset=UTF-8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7"></path><line x1="16" y1="3" x2="22" y2="9"></line><line x1="10" y1="14" x2="22" y2="2"></line></svg>');
+  mask-image: url('data:image/svg+xml;charset=UTF-8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7"></path><line x1="16" y1="3" x2="22" y2="9"></line><line x1="10" y1="14" x2="22" y2="2"></line></svg>');
+}
+
+.icon-upload {
+  -webkit-mask-image: url('data:image/svg+xml;charset=UTF-8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>');
+  mask-image: url('data:image/svg+xml;charset=UTF-8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>');
+}
+
+.icon-undo {
+  -webkit-mask-image: url('data:image/svg+xml;charset=UTF-8,<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-corner-up-left"><polyline points="9 14 4 9 9 4"></polyline><path d="M20 20v-7a4 4 0 0 0-4-4H4"></path></svg>');
+  mask-image: url('data:image/svg+xml;charset=UTF-8,<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-corner-up-left"><polyline points="9 14 4 9 9 4"></polyline><path d="M20 20v-7a4 4 0 0 0-4-4H4"></path></svg>');
+}
+
+.icon-redo {
+  -webkit-mask-image: url('data:image/svg+xml;charset=UTF-8,<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-corner-up-right"><polyline points="15 14 20 9 15 4"></polyline><path d="M4 20v-7a4 4 0 0 1 4-4h12"></path></svg>');
+  mask-image: url('data:image/svg+xml;charset=UTF-8,<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-corner-up-right"><polyline points="15 14 20 9 15 4"></polyline><path d="M4 20v-7a4 4 0 0 1 4-4h12"></path></svg>');
+}
+
+.icon-clear {
+  -webkit-mask-image: url('data:image/svg+xml;charset=UTF-8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18m-2 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>');
+  mask-image: url('data:image/svg+xml;charset=UTF-8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18m-2 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>');
+}
+
+/* Ant Design Modal Styles */
+.label-radio-group {
+  padding: 1rem 0;
+}
+
+.label-radio-group .ant-radio-group {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 8px;
+}
+
+.label-radio-item {
+  display: flex;
+  align-items: center;
+  transition: all 0.2s ease-in-out;
+  padding: 0.5rem;
+  border-radius: 6px;
+}
+
+.label-radio-item:hover {
+  background-color: #f0f2f5;
+}
+
+.label-color-dot {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  margin-right: 10px;
+  vertical-align: middle;
+}
 </style>
