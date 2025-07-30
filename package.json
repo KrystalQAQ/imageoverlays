@@ -1,0 +1,25 @@
+{
+  "name": "imageoverlays",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc -b && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "konva": "^9.3.22",
+    "leafer-ui": "1.1.0",
+    "@leafer-in/editor": "1.1.0",
+    "vue": "^3.5.17",
+    "vue-konva": "^3.2.2"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^6.0.0",
+    "@vue/tsconfig": "^0.7.0",
+    "typescript": "~5.8.3",
+    "vite": "^7.0.4",
+    "vue-tsc": "^2.2.12"
+  }
+}
