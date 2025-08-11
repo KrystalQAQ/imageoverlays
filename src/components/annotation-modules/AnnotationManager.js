@@ -36,6 +36,7 @@ class AnnotationManager {
     annotations.forEach(ann => {
       const group = this.createAnnotationGroup(ann, { scale, imagePosition });
       if (group) {
+        this.enhanceGroupForInteraction(group);
         group.on('dragend', () => onStateChange('Move'));
         group.on('transformend', () => onStateChange('Transform'));
         addDraggable(group);
@@ -68,6 +69,7 @@ class AnnotationManager {
       stroke: ann.stroke,
       strokeWidth: baseStrokeWidth / stageScale,
       name: 'main-shape',
+      fill: 'rgba(0,0,0,0)', // 确保形状是可点击的
     };
 
     if (ann.type === 'rect') {
@@ -99,33 +101,112 @@ class AnnotationManager {
    * @param {string} color - 标签颜色。
    */
   addLabelToGroup(group, textContent, color) {
+    // 使用一个容器承载文本和背景，便于整体定位
+    const labelContainer = new Konva.Group({
+      x: 0,
+      y: 0,
+      name: 'label-container',
+      listening: false,
+    });
+
     const text = new Konva.Text({
-        x: 0,
-        y: 0,
-        text: textContent,
-        fontSize: 14,
-        fontFamily: 'Arial',
-        fill: 'white',
-        padding: 5,
-        listening: false,
-        name: 'label-text',
+      x: 0,
+      y: 0,
+      text: textContent,
+      fontSize: 14,
+      fontFamily: 'Arial',
+      fill: 'white',
+      padding: 5,
+      listening: false,
+      name: 'label-text',
     });
 
     const textBackground = new Konva.Rect({
-        x: 0,
-        y: 0,
-        name: 'label-background',
-        fill: color || 'black',
-        opacity: 0.8,
-        cornerRadius: 3,
-        listening: false,
+      x: 0,
+      y: 0,
+      name: 'label-background',
+      fill: color || 'black',
+      opacity: 0.8,
+      // cornerRadius: 3,
+      listening: false,
     });
 
     textBackground.width(text.width());
     textBackground.height(text.height());
 
-    // 标签默认放在组的左上角
-    group.add(textBackground, text);
+    labelContainer.add(textBackground, text);
+    group.add(labelContainer);
+
+    // 初始定位到主形状左上角
+    this.positionLabel(group);
+  }
+
+  /**
+   * 将标签容器定位到主形状的左上角（相对组坐标）。
+   * @param {Konva.Group} group
+   */
+  positionLabel(group) {
+    const mainShape = group.findOne('.main-shape');
+    const labelContainer = group.findOne('.label-container');
+    if (!mainShape || !labelContainer) return;
+
+    // 计算主形状相对 group 的包围盒
+    const bbox = mainShape.getClientRect({ relativeTo: group });
+    // 稍微上移一点，避免覆盖边框
+    const offset = 0;
+    labelContainer.position({ x: bbox.x, y: bbox.y - (labelContainer.height() + offset) });
+  }
+
+  /**
+   * 在组上挂载拖拽/变换的行为，确保标签与形状联动且不被拉伸。
+   * @param {Konva.Group} group
+   */
+  enhanceGroupForInteraction(group) {
+    const mainShape = group.findOne('.main-shape');
+    if (!mainShape) return;
+
+    // 在缩放过程中，让文本与背景保持字号不变（通过反向 scale）
+    const text = this.findAssociatedText(group);
+    const bg = text ? this.findAssociatedLabelBackground(text) : undefined;
+
+    group.on('transform', () => {
+      const scaleX = group.scaleX() || 1;
+      const scaleY = group.scaleY() || 1;
+      if (text) text.scale({ x: 1 / scaleX, y: 1 / scaleY });
+      if (bg) bg.scale({ x: 1 / scaleX, y: 1 / scaleY });
+      // 缩放过程中动态跟随主形状
+      this.positionLabel(group);
+    });
+
+    // 变换结束后，把 group 的缩放折算成 shape 的尺寸，重置 group 缩放，保持标签位置
+    group.on('transformend', () => {
+      const scaleX = group.scaleX() || 1;
+      const scaleY = group.scaleY() || 1;
+
+      if (mainShape instanceof Konva.Rect) {
+        mainShape.width(Math.max(1, mainShape.width() * scaleX));
+        mainShape.height(Math.max(1, mainShape.height() * scaleY));
+      } else if (mainShape instanceof Konva.Circle) {
+        // 对于圆，使用平均缩放计算半径
+        const avg = (scaleX + scaleY) / 2;
+        mainShape.radius(Math.max(1, mainShape.radius() * avg));
+      }
+
+      group.scale({ x: 1, y: 1 });
+
+      // 恢复文本/背景的 scale，并更新背景尺寸
+      if (text) text.scale({ x: 1, y: 1 });
+      if (bg) {
+        bg.scale({ x: 1, y: 1 });
+        bg.width(text.width());
+        bg.height(text.height());
+      }
+      // 统一重新定位
+      this.positionLabel(group);
+    });
+
+    // 拖动过程中也保持标签与主形状相对位置
+    group.on('dragmove', () => this.positionLabel(group));
   }
 
   /**

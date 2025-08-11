@@ -1,7 +1,7 @@
 <template>
   <div id="app-container">
     <header class="app-header">
-      <h1>Image Annotation Tool</h1>
+      <h1 class="text-blue-500">Image Annotation Tool</h1>
     </header>
     <main class="app-main">
       <div class="tool-wrapper">
@@ -47,8 +47,8 @@ const annotationsStore = ref({});
 
 imageList.value.forEach(img => {
   annotationsStore.value[img.id] = {
-      annotations: [],
-      history: null, // Will store { history: [], historyIndex: 0 }
+    annotations: [],
+    history: null, // Will store { history: [], historyIndex: 0 }
   };
 });
 
@@ -74,8 +74,8 @@ const switchImage = (newIndex) => {
   if (currentImageIndex.value !== -1) {
     const currentImageId = imageList.value[currentImageIndex.value].id;
     annotationsStore.value[currentImageId] = {
-        annotations: tool.getAnnotations(),
-        history: tool.historyManager.getHistoryState(),
+      annotations: tool.getAnnotations(),
+      history: tool.historyManager.getHistoryState(),
     };
     console.log(`Saved state for ${currentImageId}:`, annotationsStore.value[currentImageId]);
   }

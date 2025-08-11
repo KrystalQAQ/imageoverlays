@@ -76,7 +76,7 @@ export default defineComponent({
   props: {
     enableZoom: {
       type: Boolean,
-      default: true,
+      default: false,
     },
     image: {
       type: String,
@@ -489,6 +489,9 @@ export default defineComponent({
       // Add label to the group
       const labelText = `${selectedLabel.name}${this.getLabelCount(selectedLabel.id)}`;
       this.annotationManager.addLabelToGroup(group, labelText, selectedLabel.color);
+
+      // 增强分组，以保证标签在拖动/缩放时与形状联动
+      this.annotationManager.enhanceGroupForInteraction(group);
 
       // Add the completed group to the layer and selection manager
       this.annotationManager.annotationLayer.add(group);

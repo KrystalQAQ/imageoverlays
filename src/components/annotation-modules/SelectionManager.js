@@ -48,27 +48,31 @@ class SelectionManager {
     if (e.target.getParent() instanceof Konva.Transformer) {
       return;
     }
+    // 检查点击的是否为主形状，如果是，则选择其父group
+    const targetGroup = e.target.name() === 'main-shape' ? e.target.getParent() : (e.target.getParent()?.name() === 'annotation-group' ? e.target.getParent() : null);
 
-    // 如果点击的是标注图层中的形状
-    if (e.target.getLayer() === this.annotationLayer) {
-        // 使用 meta/ctrl 键进行多选
+    if (targetGroup) {
+      // 使用 meta/ctrl 键进行多选
       const metaPressed = e.evt.shiftKey || e.evt.ctrlKey || e.evt.metaKey;
-      const isSelected = this.transformer.nodes().indexOf(e.target) >= 0;
+      const isSelected = this.transformer.nodes().indexOf(targetGroup) >= 0;
 
       if (!metaPressed && !isSelected) {
         // 单选
-        this.transformer.nodes([e.target]);
+        this.transformer.nodes([targetGroup]);
       } else if (metaPressed && isSelected) {
         // 从多选中移除
         const nodes = this.transformer.nodes().slice();
-        nodes.splice(nodes.indexOf(e.target), 1);
+        nodes.splice(nodes.indexOf(targetGroup), 1);
         this.transformer.nodes(nodes);
       } else if (metaPressed && !isSelected) {
         // 添加到多选
-        const nodes = this.transformer.nodes().concat([e.target]);
+        const nodes = this.transformer.nodes().concat([targetGroup]);
         this.transformer.nodes(nodes);
       }
       this.options.onSelectionChange(this.transformer.nodes());
+    } else if (e.target.getLayer() === this.annotationLayer) {
+      this.transformer.nodes([]);
+      this.options.onSelectionChange([]);
     }
   }
 
@@ -79,24 +83,12 @@ class SelectionManager {
    */
   addDraggable(group) {
     group.draggable(true);
-
+    // 让整组可在图片范围内自由拖动（包含标签与形状）
     group.dragBoundFunc((pos) => {
-        const image = this.imageManager.getKonvaImage();
-        const imageBox = {
-            x1: image.x(),
-            x2: image.x() + image.width(),
-            y1: image.y(),
-            y2: image.y() + image.height()
-        };
-
-        const { width, height } = group.getClientRect({ relativeTo: group.getParent() });
-
-        const newX = Math.max(imageBox.x1, Math.min(pos.x, imageBox.x2 - width));
-        const newY = Math.max(imageBox.y1, Math.min(pos.y, imageBox.y2 - height));
-
-        return { x: newX, y: newY };
+      // 使用图片边界进行限制，防止拖出图像区域
+      const clamped = this.imageManager.getClampedPos(pos.x, pos.y);
+      return { x: clamped.x, y: clamped.y };
     });
-
     group.on('dragend', () => this.options.onTransformEnd('Move'));
     group.on('transformend', () => this.options.onTransformEnd('Transform'));
   }
